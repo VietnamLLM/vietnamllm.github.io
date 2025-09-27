@@ -2,6 +2,7 @@ import { Footer, Layout, Navbar } from 'nextra-theme-docs'
 import { Banner, Head } from 'nextra/components'
 import { getPageMap } from 'nextra/page-map'
 import 'nextra-theme-docs/style.css'
+import './globals.css'
 import React from 'react'
 
 export const metadata = {
@@ -47,7 +48,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
                 <link rel="manifest" href="/favicon/site.webmanifest" />
                 {/* Your additional tags should be passed as `children` of `<Head>` element */}
             </Head>
-            <body>
+            <body style={{ fontFamily: '"Segoe UI", -apple-system, BlinkMacSystemFont, "Roboto", "Oxygen", "Ubuntu", "Cantarell", "Fira Sans", "Droid Sans", "Helvetica Neue", sans-serif' }}>
                 <Layout
                     banner={banner}
                     navbar={navbar}

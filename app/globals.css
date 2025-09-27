@@ -1,0 +1,42 @@
+/* Global font family override for Segoe UI */
+:root {
+  --font-family: "Segoe UI", -apple-system, BlinkMacSystemFont, "Roboto", "Oxygen", "Ubuntu", "Cantarell", "Fira Sans",
+    "Droid Sans", "Helvetica Neue", sans-serif;
+}
+
+* {
+  font-family: var(--font-family);
+}
+
+body {
+  font-family: var(--font-family);
+}
+
+/* Override Nextra theme font variables if they exist */
+html {
+  --nextra-font-sans: var(--font-family);
+  --font-sans: var(--font-family);
+}
+
+/* Ensure all text elements use Segoe UI */
+h1,
+h2,
+h3,
+h4,
+h5,
+h6,
+p,
+span,
+div,
+a,
+button,
+.nextra-content,
+.nextra-nav,
+.nextra-sidebar {
+  font-family: var(--font-family) !important;
+}
+
+/* Override any existing font declarations */
+.nx-font-sans {
+  font-family: var(--font-family) !important;
+}
