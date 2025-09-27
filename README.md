@@ -171,6 +171,37 @@ If search is not working:
 - Check that Pagefind files are deployed to `/_pagefind/` on your site
 - Ensure content has proper HTML structure (Pagefind looks for `data-pagefind-body`)
 
+## 🗺️ Sitemap
+
+The site automatically generates an XML sitemap for SEO:
+
+### Dynamic Sitemap Route
+
+- **URL**: `/sitemap.xml` 
+- **Auto-discovery**: Scans all MDX files in the `app/` directory
+- **Metadata**: Extracts frontmatter data (title, date) from posts
+- **SEO optimized**: Includes priority, change frequency, and last modified dates
+
+### Sitemap Features
+
+- **Automatic page discovery**: Finds all MDX pages and posts
+- **Priority assignment**: 
+  - Homepage: `1.0` (highest priority)
+  - Blog posts: `0.8` 
+  - Other pages: `0.5-0.7`
+- **Change frequency**: Based on content type (daily/weekly/monthly)
+- **Last modified**: Uses frontmatter date or current date
+
+### Static Sitemap Generation
+
+For static hosting, a sitemap file is also generated during build:
+
+```bash
+npm run sitemap  # Generate sitemap.xml in out/ directory
+```
+
+The sitemap is accessible at: `https://vietnamllm.github.io/sitemap.xml`
+
 ## 🎨 Customization
 
 ### Theme Configuration
@@ -233,7 +264,8 @@ The static files will be generated in the `out/` directory.
 - `npm start` - Start production server  
 - `npm run lint` - Run ESLint
 - `npm run new-post` - Create new blog post interactively
-- `postbuild` - Generate Pagefind search index (runs automatically after build)
+- `npm run sitemap` - Generate sitemap.xml file (standalone)
+- `postbuild` - Generate Pagefind search index and sitemap (runs automatically after build)
 
 ## 🤝 Contributing
 
