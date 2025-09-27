@@ -5,7 +5,7 @@ import path from 'path'
 export const dynamic = "force-static"
 
 // Base URL for the site
-const BASE_URL = process.env.SITE_URL || 'https://vietnamllm.github.io'
+const BASE_URL = process.env.SITE_URL || 'https://vietllm.pages.dev'
 
 // Function to get file modification time
 function getFileModTime(filePath: string): Date {
