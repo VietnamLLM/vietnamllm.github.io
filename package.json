@@ -8,8 +8,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "postbuild": "pagefind --site out --output-path out/_pagefind && node scripts/generate-sitemap.js",
-    "sitemap": "node scripts/generate-sitemap.js",
+    "postbuild": "pagefind --site out --output-path out/_pagefind",
     "new-post": "node scripts/new-post.js"
   },
   "repository": {
