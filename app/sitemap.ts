@@ -1,5 +1,5 @@
 import type { MetadataRoute } from 'next'
-import { readdirSync, statSync } from 'fs'
+import { readdirSync, statSync, readFileSync } from 'fs'
 import path from 'path'
 
 export const dynamic = "force-static"
@@ -74,6 +74,107 @@ function getChangeFrequency(urlPath: string): 'always' | 'hourly' | 'daily' | 'w
     return 'monthly'
 }
 
+// Function to find images in public directory
+function findImages(dir: string = 'public'): string[] {
+    const imageExtensions = /\.(jpg|jpeg|png|gif|webp|svg)$/i
+    const images: string[] = []
+    
+    try {
+        const fullDir = path.join(process.cwd(), dir)
+        const items = readdirSync(fullDir, { withFileTypes: true })
+        
+        for (const item of items) {
+            const itemPath = path.join(dir, item.name)
+            
+            if (item.isDirectory() && !item.name.startsWith('.') && !item.name.startsWith('_')) {
+                // Recursively search subdirectories, excluding hidden and system directories
+                images.push(...findImages(itemPath))
+            } else if (item.isFile() && imageExtensions.test(item.name)) {
+                // Convert to URL path (remove 'public' prefix)
+                const urlPath = itemPath.replace(/^public\//, '/')
+                images.push(urlPath)
+            }
+        }
+    } catch (error) {
+        console.warn(`Could not read directory ${dir}:`, error)
+    }
+    
+    return images
+}
+
+// Function to extract images from markdown content
+function extractImagesFromMdx(filePath: string): string[] {
+    const images: string[] = []
+    
+    try {
+        const content = readFileSync(filePath, 'utf-8')
+        
+        // Match markdown image syntax: ![alt](src)
+        const markdownImageRegex = /!\[.*?\]\(([^)]+)\)/g
+        // Match HTML img tags: <img src="..." />
+        const htmlImageRegex = /<img[^>]+src=["']([^"']+)["'][^>]*>/g
+        
+        let match
+        
+        // Extract markdown images
+        while ((match = markdownImageRegex.exec(content)) !== null) {
+            let imagePath = match[1]
+            // Convert relative paths to absolute URLs
+            if (!imagePath.startsWith('http') && !imagePath.startsWith('/')) {
+                imagePath = `/${imagePath}`
+            }
+            if (!imagePath.startsWith('http')) {
+                images.push(imagePath)
+            }
+        }
+        
+        // Extract HTML images
+        while ((match = htmlImageRegex.exec(content)) !== null) {
+            let imagePath = match[1]
+            // Convert relative paths to absolute URLs
+            if (!imagePath.startsWith('http') && !imagePath.startsWith('/')) {
+                imagePath = `/${imagePath}`
+            }
+            if (!imagePath.startsWith('http')) {
+                images.push(imagePath)
+            }
+        }
+    } catch (error) {
+        console.warn(`Could not read file ${filePath}:`, error)
+    }
+    
+    return images
+}
+
+// Function to get images for a specific page
+function getPageImages(filePath: string, urlPath: string): string[] | undefined {
+    const images: string[] = []
+    
+    // Get images from the page content
+    const fullPath = path.join(process.cwd(), 'app', filePath)
+    const contentImages = extractImagesFromMdx(fullPath)
+    
+    // Add content images
+    contentImages.forEach(imagePath => {
+        images.push(`${BASE_URL}${imagePath}`)
+    })
+    
+    // For homepage, also include some key public images (excluding favicons)
+    if (urlPath === '') {
+        const publicImages = findImages().filter(img => 
+            !img.includes('favicon') && 
+            !img.includes('manifest') &&
+            !img.includes('_pagefind')
+        )
+        
+        publicImages.forEach(imagePath => {
+            images.push(`${BASE_URL}${imagePath}`)
+        })
+    }
+    
+    return images.length ? images : undefined
+}
+
 export default function sitemap(): MetadataRoute.Sitemap {
     try {
         // Find all page files and MDX files in the app directory
@@ -96,17 +197,35 @@ export default function sitemap(): MetadataRoute.Sitemap {
             return false
         })
         
+        // Get all images from public directory for the homepage
+        const allImages = findImages().filter(img => 
+            !img.includes('favicon') && 
+            !img.includes('manifest') &&
+            !img.includes('_pagefind')
+        ).map(img => `${BASE_URL}${img}`)
+        
         const sitemapEntries: MetadataRoute.Sitemap = relevantFiles.map(filePath => {
             const urlPath = filePathToUrl(filePath)
             const fullPath = path.join(process.cwd(), 'app', filePath)
             const lastModified = getFileModTime(fullPath)
+            const images = getPageImages(filePath, urlPath)
             
-            return {
+            const entry: MetadataRoute.Sitemap[0] = {
                 url: `${BASE_URL}${urlPath ? `/${urlPath}` : ''}`,
                 lastModified,
                 changeFrequency: getChangeFrequency(urlPath),
                 priority: getPriority(urlPath),
             }
+            
+            // Add images if any are found
+            if (images && images.length > 0) {
+                entry.images = images
+            } else if (urlPath === '' && allImages.length > 0) {
+                // For homepage, include all available images if no content images found
+                entry.images = allImages
+            }
+            
+            return entry
         })
         
         // Sort by priority (highest first)
@@ -115,12 +234,19 @@ export default function sitemap(): MetadataRoute.Sitemap {
     } catch (error) {
         console.error('Error generating sitemap:', error)
         // Fallback to static entries if dynamic generation fails
+        const fallbackImages = findImages().filter(img => 
+            !img.includes('favicon') && 
+            !img.includes('manifest') &&
+            !img.includes('_pagefind')
+        ).map(img => `${BASE_URL}${img}`)
+        
         return [
             {
                 url: `${BASE_URL}`,
                 lastModified: new Date(),
                 changeFrequency: 'monthly',
                 priority: 1,
+                images: fallbackImages.length > 0 ? fallbackImages : undefined,
             },
             {
                 url: `${BASE_URL}/about`,
