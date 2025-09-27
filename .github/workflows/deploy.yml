@@ -38,6 +38,9 @@ jobs:
         env:
           NODE_ENV: production
 
+      - name: Generate search index
+        run: npm run postbuild
+
       - name: Verify build output
         run: |
           if [ ! -d "./out" ]; then
@@ -49,6 +52,13 @@ jobs:
           echo "✅ Build successful - ./out directory found"
           echo "Build contents:"
           ls -la ./out
+          echo "Checking for Pagefind:"
+          if [ -d "./out/_pagefind" ]; then
+            echo "✅ Pagefind search index found"
+            ls -la ./out/_pagefind
+          else
+            echo "⚠️ Pagefind search index not found"
+          fi
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
