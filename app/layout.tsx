@@ -46,9 +46,13 @@ export default async function RootLayout({ children }: { children: React.ReactNo
                 <link rel="shortcut icon" href="/favicon/favicon.ico" />
                 <link rel="apple-touch-icon" sizes="180x180" href="/favicon/apple-touch-icon.png" />
                 <link rel="manifest" href="/favicon/site.webmanifest" />
+                {/* Preload Fira Code font for better performance */}
+                <link rel="preconnect" href="https://fonts.googleapis.com" />
+                <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
+                <link rel="preload" href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@300;400;500;600;700&display=swap" as="style" />
                 {/* Your additional tags should be passed as `children` of `<Head>` element */}
             </Head>
-            <body style={{ fontFamily: '"Segoe UI", -apple-system, BlinkMacSystemFont, "Roboto", "Oxygen", "Ubuntu", "Cantarell", "Fira Sans", "Droid Sans", "Helvetica Neue", sans-serif' }}>
+            <body>
                 <Layout
                     banner={banner}
                     navbar={navbar}

@@ -18,21 +18,13 @@ Matrix multiplication on GPUs may currently be the most important algorithm that
 | 10: Warptiling           | `21779.3` | `93.7%`                        |
 | 0: cuBLAS                | `23249.6` | `100.0%`                       |
 
-> > > ## –
-
-## Come work on kernels at [Anthropic](https://www.anthropic.com/)!
-
-We’re always hiring for capable performance & kernel engineers to optimize our models on TPUs, GPUs & Trainium. Apply [here](https://boards.greenhouse.io/anthropic/jobs/4020350008)!
-
-> > > ## –
-
 ## Kernel 1: Naive Implementation
 
 In the CUDA programming model, computation is ordered in a three-level hierarchy. Each invocation of a CUDA kernel creates a new grid, which consists of multiple blocks. Each block consists of up to 1024 individual threads. Threads that are in the same block have access to the same shared memory region (SMEM).
 
 The number of threads in a block can be configured using a variable normally called `blockDim`, which is a vector consisting of three ints. The entries of that vector specify the sizes of `blockDim.x`, `blockDim.y` and `blockDim.z`, as visualized below:
 
-![](/images/CUDA-MMM/CUDA_thread_hierarchy.png)
+![CUDA_thread_hierarchy](/images/CUDA-MMM/CUDA_thread_hierarchy.png)
 
 Similarly, the number of blocks in a grid is configurable using the `gridDim` variable. When we launch a new kernel from the host, it creates a single grid, containing the blocks and threads as specified. It’s important to keep in mind that the thread hierarchy we just talked about mostly concerns program correctness. For program performance, as we’ll see later, it’s not a good idea to treat all threads in the same block as equals.
 
@@ -51,6 +43,7 @@ sgemm_naive<<<gridDim, blockDim>>>(M, N, K, alpha, A, B, beta, C);
 CUDA code is written from a single-thread perspective. In the code of the kernel, we access the `blockIdx` and `threadIdx` built-in variables. These will return different values based on the thread that’s accessing them.
 
 <!-- ```cuda -->
+
 ```cpp
 __global__ void sgemm_naive(int M, int N, int K, float alpha, const float *A,
                             const float *B, float beta, float *C) {
@@ -72,7 +65,7 @@ __global__ void sgemm_naive(int M, int N, int K, float alpha, const float *A,
 
 To visualize this simple kernel:
 
-![](/images/CUDA-MMM/naive-kernel.png)
+![naive](/images/CUDA-MMM/naive-kernel.png)
 
 This kernel takes about 0.5s to process three 4092² fp32 matrices on my A6000 GPU. Let’s do some non-implementation-specific calculations:
 
@@ -80,9 +73,9 @@ This kernel takes about 0.5s to process three 4092² fp32 matrices on my A6000 G
 
 For a matrix multiplication of two 4092² matrices, followed by an addition of a 4092² matrix (to make the [GEMM](https://en.wikipedia.org/wiki/Basic_Linear_Algebra_Subprograms#Level_3)):
 
-1.  Total FLOPS: `2*4092³ + 4092² = 137 GFLOPS`
-2.  Total data to read (minimum!): `3 * 4092² * 4B = 201MB`
-3.  Total data to store: `4092² * 4B = 67MB`
+1. Total FLOPS: `2*4092³ + 4092² = 137 GFLOPS`
+2. Total data to read (minimum!): `3 * 4092² * 4B = 201MB`
+3. Total data to store: `4092² * 4B = 67MB`
 
 So 268MB is the absolute minimum of memory that any implementation would have to transfer from/to global GPU memory, assuming it has a big enough cache. Let’s calculate some upper bounds on kernel performance. The GPU is advertised with 30TFLOPs/s of fp32 compute throughput and 768GB/s of global memory bandwidth. If we achieved those numbers, we’d need 4.5ms for the calculation and 0.34ms for the memory transfers. So in our napkin math, the calculation takes ~10x more time than the memory accesses. This means our final optimized kernel will be compute-bound, as long as we end up having to transfer <10x the absolute minimum memory volume of 278MB.
 
@@ -94,7 +87,7 @@ In our kernel, two threads in the same block with ThreadIds (0, 0) and (0, 1) wi
 
 Below is a visualization of the memory access pattern of our naive kernel, taking two threads A (red) and B (green) as an example:
 
-![](/images/CUDA-MMM/naive_kernel_mem_access.png)
+![naive_kernel_mem_access](/images/CUDA-MMM/naive_kernel_mem_access.png)
 
 So to recap, when I run this kernel on an A6000 GPU it achieves ~300GFLOPs when multiplying two 4092x4092 float32 matrices. Pretty bad, considering that the A6000 is advertised as being able to achieve almost 30 TFLOPs. So how can we start to make this faster? One way is to optimize the memory access pattern of our kernel such that global memory accesses can be coalesced (=combined) into fewer accesses.
 
@@ -102,25 +95,26 @@ So to recap, when I run this kernel on an A6000 GPU it achieves ~300GFLOPs when 
 
 Before we get into global memory coalescing, we need to learn about the concept of a warp. For execution, the threads of a block are grouped into so-called warps, consisting of 32 threads. A warp is then assigned to a warp scheduler, which is the physical core that executes the instructions. There are four warp schedulers per multiprocessor. The grouping into warps happens based on a consecutive `threadId`. If we set the `blockDim` to be multi-dimension, then the threadId is calculated like so:
 
-```plaintext
+```cpp
 threadId = threadIdx.x+blockDim.x*(threadIdx.y+blockDim.y*threadIdx.z)
 ```
 
 Then, threads with neighbouring `threadId` become part of the same warp. Below I tried to illustrate this, using a smaller “warpsize” of 8 threads (real warps always contain 32 threads):
 
-![](/images/CUDA-MMM/threadId_to_warp_mapping.png)
+![threadId_to_warp_mapping](/images/CUDA-MMM/threadId_to_warp_mapping.png)
 
 The concept of a warp is relevant for this second kernel, as sequential memory accesses by threads that are part of the same warp can be grouped and executed as one. This is referred to as **global memory coalescing**. It’s the most important thing to keep in mind when optimizing a kernel’s GMEM memory accesses toward achieving the peak bandwidth.
 
 Below is an example, where consecutive memory accesses by threads in the same warp are grouped, allowing each warp to execute 8 memory accesses using only 2 32B loads:
 
-![](/images/CUDA-MMM/GMEM_coalescing.png)
+![GMEM_coalescing](/images/CUDA-MMM/GMEM_coalescing.png)
 
 In reality, the GPU supports 32B, 64B and 128B memory accesses. So, if each thread is loading a 32bit float from global memory, the warp scheduler (probably the MIO) can coalesce this `32*4B=128B` load into a single transaction. This is only possible if the floats loaded are consecutive in memory, and if access is aligned. If they aren’t, or if access cannot be coalesced for some other reason, then the GPU will execute as many 32B loads as necessary to fetch all floats, leading to a lot of wasted bandwidth. Profiling our naive kernel, we can observe the detrimental effect of non-coalesced access as we achieve only 15GB/s of GMEM throughput.
 
 Looking back at the previous kernel, we assigned threads their entry of C like so:
 
 <!-- ```cuda -->
+
 ```cpp
 const uint x = blockIdx.x * blockDim.x + threadIdx.x;
 const uint y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -128,15 +122,16 @@ const uint y = blockIdx.y * blockDim.y + threadIdx.y;
 
 Hence, threads of the same warp (those with consecutive `threadIdx.x`) were loading the rows of A non-consecutively from memory. The naive kernel’s pattern of accessing the memory of A looked more like so:
 
-![](/images/CUDA-MMM/Naive_kernel_mem_coalescing.png)
+![Naive_kernel_mem_coalescing](/images/CUDA-MMM/Naive_kernel_mem_coalescing.png)
 
 To enable coalescing, we can change how we assign positions of the result matrix C to threads. This change in the global memory access pattern is illustrated below:
 
-![](/images/CUDA-MMM/Naive_kernel_improved_access.png)
+![Naive_kernel_improved_access](/images/CUDA-MMM/Naive_kernel_improved_access.png)
 
 To implement this, we only need to change the first two lines:
 
 <!-- ```cuda -->
+
 ```cpp
 const int x = blockIdx.x * BLOCKSIZE + (threadIdx.x / BLOCKSIZE);
 const int y = blockIdx.y * BLOCKSIZE + (threadIdx.x % BLOCKSIZE);
@@ -172,11 +167,12 @@ So for this next kernel, we’ll load a chunk of A and a chunk of B from global 
 
 This is illustrated below:
 
-![](/images/CUDA-MMM/cache-blocking.png)
+![cache](/images/CUDA-MMM/cache-blocking.png)
 
 The important parts of the code are below, with variable names corresponding to the plot above:
 
 <!-- ```cuda -->
+
 ```cpp
 // advance pointers to the starting positions
 A += cRow * BLOCKSIZE * K;                    // row=cRow, col=0
@@ -216,7 +212,7 @@ C[threadRow * N + threadCol] =
 
 This kernel achieves ~2200 GFLOPS, a 50% improvement over the previous version. We’re still far away from hitting the ~30 TFLOPs that the GPU can provide. This is obvious from the roofline plot below:
 
-![Roofline analysis of kernel 3](/images/CUDA-MMM/roofline_kernel_3.png)
+![roofline_kernel_3Roofline analysis of kernel 3](/images/CUDA-MMM/roofline_kernel_3.png)
 
 At a CHUNKSIZE of 32, this uses `2*32*32*4B=8KB` of shared memory space. My A6000 GPU has a maximum of 48KB of shared memory space available for each block, so we’re far away from hitting that limit. This is not necessarily a problem, as there are downsides to increasing per-block shared-memory usage. Each multiprocessor (SM) has a maximum of 100KB of SMEM available. This means that if we’d modify our kernel to use the full 48KB of SMEM available, each SM could only keep two blocks loaded at the same time. In CUDA parlance, increasing per-block SMEM utilization can decrease [occupancy](https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html#occupancy). Occupancy is defined as the ratio between the number of active warps per SM and the maximum possible number of active warps per SM.
 
@@ -263,7 +259,7 @@ So this kernel is limited by the number of threads per block, and the number of 
 
 A 66% occupancy is not too bad, so this doesn’t explain why our kernel runs so slow. Looking at the profiler gives us some hints. First, if we look at the mix of executed instructions, most of them are memory loads:
 
-![](/images/CUDA-MMM/kernel_3_profiler_instr_mix.png)
+![kernel_3_profiler_instr_mix](/images/CUDA-MMM/kernel_3_profiler_instr_mix.png)
 
 Our inner loop looks like this in PTX ([Godbolt link](https://godbolt.org/#z:OYLghAFBqd5TKALEBjA9gEwKYFFMCWALugE4A0BIEAZgQDbYB2AhgLbYgDkAjF%2BTXRMiAZVQtGIHgBYBQogFUAztgAKAD24AGfgCsp5eiyahUAV0wtyKxqiIEh1ZpgDC6embZMQAVgBs5M4AMgRM2AByngBG2KQgAMwA7OQADuhKxA5Mbh5evgFpGfZCIWGRbDFxSdbYtsVMIkQspEQ5nt7SyTbYdlmNzUSlEdGxCV1NLW15ndYTg6HDFaNJAJTW6GakqJxcAKQATPGhqB44ANS78S4SwGTESGyXuLtaAIIHR0wnFtgXV6hKIiEdBPF7vQ7HU6/S4uAFA%2BgEKKgt4fSE/P6wsxRIxKAD6ADd9gA6JDI8Gfb7nGHmSy40hmYQEDgkslgj44OhhM4uXAASSCuIAIryAGoQACy5DO4RWZyg4tlBwAQnKZQBaHiygD0qpWbLeuNxwHo6CiEkNZ3x6AImDOSmA2DYbFxSiQzWwmFxHGd2PQqAA1hBQkQzpKzsHpVKIwBpKU0E0sEMSFJu8hgs4ZzNZ7M53N5zMYJiAs7x9CJs4AKleUsLxdL5YrSrTb3zrbb%2BfrIZiTTjCZDFZcisSSvTZ1rIYjSqCAHkXNGRLyAFrPeKC%2BL7S4jlsXbdanVEJC/DZEFJmLsmgNnA/lgDuvxvxhDJDH6DYp6Iv1CV6QBCU39I2AsJgvoBqO45nGYEaoAASugN5/IKZwgf6vKYOoRLqJuYFCMWkHCGOOQIUhF4oWhRIAJ5YSiu46hIF6Jr8URmDQNCxCWZBjpsAH4ch4ZMCWLDFq67q2t6o57naboAaJjrhn%2BwnSUh2BEHezBnHR/6AZgf5fiwxF%2Bv6o6GgpHoWp2ZyvEouw%2BEqU6zvOS64JWZx2XOC7LtZgpUa8GbGVJpm4iWfYuVZNmuQ5y7OeF7nPD4XnxFu7w0d%2Bn5MGEpBnKQcEXPsfgvvQ363tgYBcAB6moNsSgZCYfHfr%2BmlAdhRYhnhT5IABQGEZciEHh1mCoeh6g5T4Lkzm5jneRm4GtQ1mCwfB3WzQNGFnDq0UTQl%2Bo%2BattGYPixjbGcaTBrEf7PgevyAgMoTAEd6SZDho4%2Bcqi0wdlFajfZMXOdGm7tnmElZTe3VvTeNbuN1WijiqL2rgR7hRWNEUriq/2toDcGQ%2BD9Agzko4uDlI5w6DiNfY5znhIT8MFR960eQlO2ZZjq6g9juMQ9R23mUQb5EVoRJQ5t26CBlQY8aRQ2LYLKpRBLGJnL9DOywNhOLXTuBDolWYSQAEiw%2BK/IBqBILNZwJraQhHjQKVnLUjrMEQOn8c9uUuaOGYSeKLD%2Br8F2zYREDdb1WnLeosp%2B7WPRngQBt8TgmHbh7%2B7oOp9AmvBxqmhIZzemQ5HlZVf4YBI2BKKgN3uxZoVKsHQHzaT42Rcq/sQ3FRHvDZtdze9CtU13eNxZNmZKtXXf17TSPfc3/et4havWTX7VaeP0p90vnWz95lcSbxXdO3Vf68Qy9gFeIxufn%2BNBmGn%2BdpKeRgfpglfGeRXx7xAepC9tGYu0TiHq0PDMMN9h/0%2Bo3JyH1whb0TozbA6go4fhtpgdAJ4sqYDMHYM4QgbbmFINxIg9B85n0PLaZClcRZygjMgogKspZ/WobQq4YDkZ/ReiAhhaFNaVwzDzFIqs4aWQXmPHu6sqYcMwm3Cs3C8wjwXuIhuyM159QHvFLWmZdiJC8jAiSYQPRXhTkoV%2BqB1LABYLpNqhsmCYClM%2BfW1pbQ0EEh%2BDKe9t46lYkQY2N0bZhHUOeAyfFzqHjHCwc%2BSkRaXXTmxPe6kyrILCM/F0Rj36fzURorR20XBCPXt3eCkClFaRUQhaRyY3TOV4VTbsekPpZM7jklelNp45JUVvTRXA1j0G4D4fg3guA6HIOgbgLgFCCh8lkkBzclAbC2NCQ4fByBEG0O0tYh4gKjA/uQf0vgtCGG4NIHpSyBncH4EoEAOzFl9PaeQOAsAUAYDfAwWIlBqD3JSI8uITB8QVR4DwZIOB8QEG2CKAg2AbzThSMwQ5dB6DONORAKIhyoihGaORbg8z7kcGENOJghDDk4DYMYY0Ox%2BmEAAr0A2pzLmBHgeYD8aL%2BAnU6VShEURSAorcDgQ5RBSBMnpWseMLBgBKGBaC8FkLeD8EEMIMQJcpCyClYoFQGhDn6H2IYQlaALBWBZacyAax0ApHqJSk5dteiOAgM4KY3geCBCsUMcolQDCFAetkdw7QnX3XqPakYcQbXdDNQ0OYVqDD%2BvqP0Fo3qli%2BtmAMYNfq5iRsdZqdYmxthSA6V0g5VLBlcGlCKFwBMflEkSALOU%2BBiAcQ%2BJqfgFydArBWVpdZawtk%2BB2Uy/Z5Ben9JzScs5Cyln1t2VwfY/A2AgGkPzPwPhEgAE5DhaH2IkeIWgfAzp8D4Tthye39suWsG5yAQD/MBdgZ5EBXnvPCOwHY4R82Fp4MWgW/APQVp5ZgAwCqZWSBkHIYQyg1CaCpaqmodQshOCscG6QAAOW1mBE2jB4D4G1zr6hxtSJ6rIcHfXSBncBnoYag1uumNB0NfQE0LAdfBxDMbJiEetdR%2BYZQfVypnWsbl2BsA2jORmrg3TN3Zu4IKbAALDoirvBlG9BazhFpLVoMthASAZSrVKNwDzGCKcOPsFYNaB0NrWXEDZWyeBaDbXs0dvgZ1EniNIfYWhEh%2BBnYkXKM6J2yC7fwbdpzzk6c2VIYzQ74hZu7ccndda1gG1IBkRw0ggA%3D)):
 
@@ -275,7 +271,7 @@ fma.rn.f32      %f93, %f92, %f91, %f90;
 
 That’s not good, given that a memory load is bound to have a higher latency than a simple FMA, and given that we know our kernel should be compute bound. We see this effect when looking at the profiler’s sampling of warp states. This quantifies how many cycles were spent in each state per executed instruction:
 
-![](/images/CUDA-MMM/kernel_3_profiler_warp_stalls.png)
+![kernel_3_profiler_warp_stalls](/images/CUDA-MMM/kernel_3_profiler_warp_stalls.png)
 
 The meaning of the states is documented in the [Kernel Profiling Guide](https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html#metrics-reference). For `Stall MIO Throttle` it reads:
 
@@ -287,7 +283,7 @@ We’re not using special math instructions, nor dynamic branches, so it’s cle
 
 So this next kernel works like our last kernel, but adds a new inner loop, for calculating multiple C entries per thread. We now use a SMEM cache size of `BM*BK + BN*BK = 64*8 + 64*8 = 1024` floats, for a total of 4KB per block. Below a visualization. I have highlighted two of the threads and the values they access in the inner loop in orange and red.
 
-![](/images/CUDA-MMM/kernel_4_1D_blocktiling.png)
+![kernel_4_1D_blocktiling](/images/CUDA-MMM/kernel_4_1D_blocktiling.png)
 
 All of the important changes for this kernel happen in the inner loop. The loading for GMEM to SMEM stays largely the same as before. Let’s have a look:
 
@@ -334,7 +330,7 @@ And for our new kernel, where each thread calculates eight results:
 
 As expected, we now spend much fewer cycles per instruction stalling due to memory pressure:
 
-![](/images/CUDA-MMM/Kernel_4_profiler_warp_stalls.png)
+![Kernel_4_profiler_warp_stalls](/images/CUDA-MMM/Kernel_4_profiler_warp_stalls.png)
 
 ### Sidenote on Compiler Optimizations
 
@@ -418,7 +414,7 @@ LDS     R38, [R35.X4+0xd00]
 
 Our current kernel still suffers from the same stalling-for-memory problem as kernel 3, just to a lesser extent. So we’ll just apply the same optimization again: computing even more results per thread. The main reason this makes our kernel run faster is that it increases arithmetic intensity. Below I tried to make it more immediately obvious why calculating more results per thread raises arithmetic intensity:
 
-![](/images/CUDA-MMM/raising_arith_inten.png)
+![raising_arith_inten](/images/CUDA-MMM/raising_arith_inten.png)
 
 In conclusion, all our kernels perform the same number of FLOPs, but we can reduce the number of GMEM accesses by calculating more results per thread. We’ll continue optimizing arithmetic intensity for as long as we’re still memory bound.
 
@@ -440,7 +436,7 @@ __syncthreads();
 
 Now that the SMEM cache is populated, we have each thread multiply its relevant SMEM entries and accumulate the result into local registers. Below I illustrated the (unchanged) outer loop along the input matrices, and the three inner loops for the dot product and the `TN` and `TM` dimension:
 
-![](/images/CUDA-MMM/kernel_5_2D_blocktiling.png)
+![kernel_5_2D_blocktiling](/images/CUDA-MMM/kernel_5_2D_blocktiling.png)
 
 The interesting parts of the code look like this:
 
@@ -492,13 +488,13 @@ for (uint bkIdx = 0; bkIdx < K; bkIdx += BK) {
 
 In the inner loop, we can reduce the number of SMEM accesses by making `dotIdx` the outer loop, and explicitly loading the values we need for the two inner loops into registers. Below is a drawing of the `dotIdx` loop across time, to visualize which SMEM entries get loaded into thread-local registers at each step:
 
-![](/images/CUDA-MMM/kernel_5_reg_blocking.png)
+![kernel_5_reg_blocking](/images/CUDA-MMM/kernel_5_reg_blocking.png)
 
 Resulting performance: 16TFLOPs, another 2x improvement. Let’s repeat the memory access calculation. We’re now calculating `TM*TN = 8*8 = 64` results per thread.
 
-- GMEM: K/8 (outer loop iters) _ 2 (A+B) _ 1024/256 (sizeSMEM/numThreads) loads
-- SMEM: K/8 (outer loop iters) _ 8 (dotIdx) _ 2 (A+B) \* 8 loads
-- Memory accesses per result: K/64 GMEM, K/4 SMEM
+- $GMEM: $K/8$ (outer loop iters) _ 2 (A+B) _ 1024/256 (sizeSMEM/numThreads) loads$
+- $SMEM: $K/8$ (outer loop iters) _ 8 (dotIdx) _ 2 (A+B) \* 8 loads$
+- Memory accesses per result: $K/64 GMEM$, $K/4 SMEM$
 
 Slowly performance is reaching acceptable levels, however, warp stalls due to memory pipeline congestion are still too frequent. For kernel 6 we’ll take two measures to try to improve that: Transposing `As` to enable auto-vectorization of SMEM loads, and promising the compiler alignment on the GMEM accesses.
 
@@ -506,7 +502,7 @@ Slowly performance is reaching acceptable levels, however, warp stalls due to me
 
 The first optimization that I already hinted at earlier is to transpose `As`. This will allow us to load from `As` using vectorized SMEM loads (`LDS.128` in SASS). Below the same visualization of the three inner loops as for kernel 5, but now with `As` transposed in memory:
 
-![](/images/CUDA-MMM/kernel_6_As_transpose.png)
+![kernel_6_As_transpose](/images/CUDA-MMM/kernel_6_As_transpose.png)
 
 Looking at the assembly we see that loading `As` into the registers, which used to be a 32b `LDS` load, is now also a 128b `LDS.128` load, just like it had already been for `Bs`. This gives us a 500GFLOPs speedup, or ~3%.
 
@@ -558,8 +554,8 @@ We’ve accumulated a total of five template parameters:
 
 For kernel 6, these were set to `BM=BN=128` and `BK=TM=TN=8`. I wrote a bash script that searches through all sensible combinations and benchmarks their runtime. This required me to make sure that:
 
-1.  I knew which parameter combinations were sensible, and skip those that weren’t.
-2.  The kernel implementation was correct for the ~400 different hyperparameter settings that remained.
+1. I knew which parameter combinations were sensible, and skip those that weren’t.
+2. The kernel implementation was correct for the ~400 different hyperparameter settings that remained.
 
 The necessary modifications to the code ended up taking quite some time to implement.
 
@@ -571,7 +567,7 @@ I can’t explain why these specific parameters end up producing the optimal per
 
 Currently, our loop structure looks like this:
 
-![](/images/CUDA-MMM/Loop_structure.png)
+![Loop_structure](/images/CUDA-MMM/Loop_structure.png)
 
 We’ll now add another hierarchy of tiling, in between our blocktiling and threadtiling loops: warptiling. Warptiling is somewhat confusing initially since unlike blocks and threads, warps don’t show up anywhere in the CUDA code explicitly. They are a hardware feature that has no direct analog in the scalar CUDA-software world. We can calculate a given thread’s warpId as `warpId=threadIdx.x % warpSize`, where `warpSize` is a built-in variable that is equal to 32 on any CUDA GPU I’ve ever worked with.
 
@@ -628,13 +624,13 @@ for (uint dotIdx = 0; dotIdx < BK; ++dotIdx) {
 
 I tried my best to visualize all three levels of tiling below, although the structure is getting quite complex. Each warp will compute a chunk of size `(WSUBN * WNITER) x (WSUBM * WMITER)`. Each thread computes `WNITER * WMITER` many chunks of size `TM*TN`.
 
-![](/images/CUDA-MMM/kernel_10_warp_tiling.png)
+![kernel_10_warp_tiling](/images/CUDA-MMM/kernel_10_warp_tiling.png)
 
 After autotuning the parameters, performance improves from 19.7 TFLOPs to 21.7 TFLOPs on an A100.
 
 Here’s a plot that compares our warptiling kernel against cuBLAS across increasing matrix sizes:
 
-![](/images/CUDA-MMM/cublas_vs_kernel_10_sizes.png)
+![cublas_vs_kernel_10_sizes](/images/CUDA-MMM/cublas_vs_kernel_10_sizes.png)
 
 At dimensions 2048 and 4096, our measured FLOPs are only a few percentage points slower than cuBLAS. However, for smaller matrices, we’re doing poorly in comparison to Nvidia’s library! This happens because cuBLAS contains not one single implementation of SGEMM, but hundreds of them. At runtime, based on the dimensions, cuBLAS will pick which kernel to run. I traced the cuBLAS call and these are the kernels it’s calling at each size:
 
@@ -659,10 +655,10 @@ We can now also start prefetching the data necessary for the next loop iteration
 
 If I get back to working on this post, here’s what I’ll look at next:
 
-1.  Double buffering, for better interleaving of computation and memory loading. For now, see [CUTLASS Pipelining](https://github.com/NVIDIA/cutlass/blob/master/media/docs/efficient_gemm.md#pipelining). In CUTLASS, double buffering is done on two levels: GMEM ⇒ SMEM, and SMEM ⇒ Registerfile.
+1. Double buffering, for better interleaving of computation and memory loading. For now, see [CUTLASS Pipelining](https://github.com/NVIDIA/cutlass/blob/master/media/docs/efficient_gemm.md#pipelining). In CUTLASS, double buffering is done on two levels: GMEM ⇒ SMEM, and SMEM ⇒ Registerfile.
     - In Hopper, new instructions were introduced for warp specialization, for example for having some warp use fewer registers than others. This, in combination with special instructions to load directly from GMEM into SMEM without first going through the registers, can be used to reduce register pressure.
-2.  Getting rid of SMEM bank conflicts. This can be done by [optimizing the data layout in SMEM](https://github.com/NVIDIA/cutlass/blob/master/media/docs/implicit_gemm_convolution.md#shared-memory-layouts).
-3.  Better understanding the GEMM kernels that are implemented in [Triton](https://github.com/openai/triton), by looking at the generated PTX.
+2. Getting rid of SMEM bank conflicts. This can be done by [optimizing the data layout in SMEM](https://github.com/NVIDIA/cutlass/blob/master/media/docs/implicit_gemm_convolution.md#shared-memory-layouts).
+3. Better understanding the GEMM kernels that are implemented in [Triton](https://github.com/openai/triton), by looking at the generated PTX.
 
 ## Conclusion
 
