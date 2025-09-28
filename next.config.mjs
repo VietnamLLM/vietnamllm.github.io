@@ -1,15 +1,20 @@
-import nextra from "nextra"
+import nextra from 'nextra'
 
-// Set up Nextra with its configuration
 const withNextra = nextra({
-  // ... Add Nextra-specific options here
+  latex: true,
+  search: {
+    codeblocks: false
+  },
+  defaultShowCopyCode: false
 })
 
-// Export the final Next.js config with Nextra included
-export default withNextra({
+/** @type {import('next').NextConfig} */
+const nextConfig = {
   output: "export",
   trailingSlash: true,
   images: {
     unoptimized: true,
   },
-})
+}
+
+export default withNextra(nextConfig)
